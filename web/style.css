@@ -290,3 +290,8 @@ input[type="checkbox"] { accent-color: var(--accent); }
 .welcome-dots { display: flex; gap: 6px; }
 .welcome-dots button { width: 8px; height: 8px; padding: 0; border-radius: 50%; border: 0; background: var(--line-2); cursor: pointer; }
 .welcome-dots button.on { background: var(--accent); }
+
+/* ebooks */
+.page-head .media-tabs { align-self: flex-end; }
+.pill.ebook { color: var(--accent); border-color: currentColor; }
+.cover-wrap .ebook-chip { left: 6px; right: auto; top: 6px; bottom: auto; }

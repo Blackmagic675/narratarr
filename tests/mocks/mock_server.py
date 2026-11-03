@@ -54,6 +54,16 @@ def gen_media():
         ff("-f", "lavfi", "-i", "sine=frequency=330:duration=15", "-c:a", "libmp3lame", "-b:a", "32k", str(SRC / "part.mp3"))
     if not (SRC / "single.mp3").exists():
         ff("-f", "lavfi", "-i", "sine=frequency=550:duration=60", "-c:a", "libmp3lame", "-b:a", "32k", str(SRC / "single.mp3"))
+    if not (SRC / "book.epub").exists():
+        # a minimal, valid-looking EPUB container padded past the "tiny file" threshold
+        import zipfile
+        with zipfile.ZipFile(SRC / "book.epub", "w") as z:
+            z.writestr("mimetype", "application/epub+zip", compress_type=zipfile.ZIP_STORED)
+            z.writestr("META-INF/container.xml", '<?xml version="1.0"?><container version="1.0" '
+                       'xmlns="urn:oasis:names:tc:opendocument:xmlns:container"><rootfiles/></container>')
+            z.writestr("filler.bin", bytes(range(256)) * 160, compress_type=zipfile.ZIP_STORED)
+    if not (SRC / "book.pdf").exists():
+        (SRC / "book.pdf").write_bytes(b"%PDF-1.4\n" + b"0" * 40_000 + b"\n%%EOF\n")
     if not (SRC / "cover.jpg").exists():
         ff("-f", "lavfi", "-i", "color=c=0xe8a33d:s=500x500", "-frames:v", "1", str(SRC / "cover.jpg"))
     for i, (a, b) in enumerate(COVER_COLOURS):
@@ -91,6 +101,8 @@ CATALOG = {
         {**product("B0GAP00001", "Gap Book", ["Gwen Gap"], [], 1), "publisher_summary": None, "series": []},
         product("B0CHAP0001", "Chapter Book", ["Cora Chapter"], ["Pat Reader"], 1),
         product("B0VAN00001", "Vanish Book", ["Val Vanish"], ["Vic Reader"], 1),
+        product("B0EBOOK001", "Paper Lantern", ["Ella Page"], ["Ned Voice"], 1, [("Lantern Tales", "1")]),
+        product("B0EBOOK002", "Paper Lantern", ["Ella Page"], ["Other Narrator"], 1, [("Lantern Tales", "1")]),
         product("B0EDIT0001", "Essays On Rivers", ["Lena Krause - editor", "Omar Field - foreword"],
                 ["Contributing Authors", "Lena Krause"], 1),
     ],
@@ -124,6 +136,11 @@ SHARES = [
     ("indiepeer", "@@in\\Audiobooks\\Ivy Indie\\Indie Tale\\Indie Tale.m4b", "single.m4b", 60, {}),
     ("essaypeer", "@@es\\Audiobooks\\Lena Krause\\Essays On Rivers\\Essays On Rivers.m4b", "single.m4b", 60, {}),
     ("shelfpeer", "@@sh\\Audiobooks\\Abe Shelver\\Shelf Saga 3 - Shelf Bound\\Shelf Bound.m4b", "single.m4b", 60, {}),
+    # ebooks: an epub in a shelf folder (next to another title), a pdf elsewhere, and the audiobook
+    ("ebookpeer", "@@eb\\Books\\Ella Page\\Paper Lantern.epub", "book.epub", None, {}),
+    ("ebookpeer", "@@eb\\Books\\Ella Page\\Lantern Tales Book 2 - Paper Lantern Returns.epub", "book.epub", None, {}),
+    ("pdfpeer", "@@pd\\Ebooks\\Ella Page - Paper Lantern.pdf", "book.pdf", None, {"speed": 9_000_000}),
+    ("lanternaudio", "@@la\\Audiobooks\\Ella Page\\Paper Lantern\\Paper Lantern.m4b", "single.m4b", 60, {}),
 ]
 
 app = FastAPI()
@@ -396,6 +413,9 @@ def hardcover(request: Request, body: dict = Body(...)):
 # ABS "sees" its folder at /audiobooks; on disk that's <WORK>/abs-library (path mapping test).
 ABS_PATH = "/audiobooks"
 ABS_LOCAL = WORK / "abs-library"
+EBOOK_PATH = "/ebooks"
+EBOOK_LOCAL = WORK / "abs-ebooks"
+ROOTS = [("lib_books", ABS_PATH, ABS_LOCAL), ("lib_ebooks", EBOOK_PATH, EBOOK_LOCAL)]
 ABS = {"items": {}, "pending": [], "watcher": True}
 
 
@@ -405,11 +425,19 @@ def abs_auth(request: Request):
 
 
 def _abs_local(p: str) -> Path:
-    return ABS_LOCAL / p[len(ABS_PATH):].lstrip("/")
+    for _lib, remote, local in ROOTS:
+        if p == remote or p.startswith(remote + "/"):
+            return local / p[len(remote):].lstrip("/")
+    raise HTTPException(400, f"path outside library folders: {p}")
+
+
+def _root_of(p: Path) -> tuple[str, str, Path]:
+    return next(r for r in ROOTS if p == r[2] or r[2] in p.parents)
 
 
 def _abs_remote(p: Path) -> str:
-    return ABS_PATH + "/" + p.relative_to(ABS_LOCAL).as_posix()
+    _lib, remote, local = _root_of(p)
+    return remote + "/" + p.relative_to(local).as_posix()
 
 
 def _abs_seed():
@@ -424,7 +452,9 @@ def _abs_seed():
 
 def _abs_item(iid: str, d: Path, meta: dict) -> dict:
     audio = sorted(p for p in d.rglob("*") if p.suffix.lower() in (".mp3", ".m4b", ".m4a", ".flac"))
-    return {"id": iid, "path": _abs_remote(d), "addedAt": int(time.time() * 1000), "size": sum(p.stat().st_size for p in audio),
+    ebooks = sorted(p.name for p in d.rglob("*") if p.suffix.lower() in (".epub", ".pdf", ".mobi", ".azw3"))
+    return {"id": iid, "lib": _root_of(d)[0], "ebooks": ebooks,
+            "path": _abs_remote(d), "addedAt": int(time.time() * 1000), "size": sum(p.stat().st_size for p in audio),
             "audio": [p.name for p in audio], "duration": 60.0 if len(audio) == 1 else 15.0 * len(audio),
             "chapters": [], "cover": (d / "cover.jpg").exists(),
             "meta": {"title": meta.get("title"), "subtitle": None, "authors": meta.get("authors") or [],
@@ -437,7 +467,7 @@ def _abs_scan_dir(d: Path):
     if any(it["path"] == _abs_remote(d) for it in ABS["items"].values()):
         return
     # Simulated scanner: reads only folder names + a fixed publisher (so Narratarr has gaps to fill and a conflict)
-    parts = d.relative_to(ABS_LOCAL).parts
+    parts = d.relative_to(_root_of(d)[2]).parts
     title = parts[-1].split(" - ", 1)[-1] if parts[-1].startswith("Book ") else parts[-1]
     iid = "li_" + uuid.uuid4().hex[:8]
     ABS["items"][iid] = _abs_item(iid, d, {"title": title, "authors": [parts[0]], "publisher": "Scanner Pub"})
@@ -445,7 +475,8 @@ def _abs_scan_dir(d: Path):
 
 def _book_dir(local_file: Path) -> Path:
     d = local_file.parent
-    while d != ABS_LOCAL and not (d / ".narratarr.json").exists():
+    root = _root_of(local_file)[2]
+    while d != root and not (d / ".narratarr.json").exists():
         d = d.parent
     return d
 
@@ -485,6 +516,8 @@ def abs_libraries(request: Request):
     abs_auth(request)
     return {"libraries": [{"id": "lib_books", "name": "Audiobooks", "mediaType": "book",
                            "folders": [{"id": "fol_main", "fullPath": ABS_PATH}]},
+                          {"id": "lib_ebooks", "name": "Ebooks", "mediaType": "book",
+                           "folders": [{"id": "fol_eb", "fullPath": EBOOK_PATH}]},
                           {"id": "lib_pod", "name": "Podcasts", "mediaType": "podcast", "folders": [{"id": "fol_p", "fullPath": "/podcasts"}]}]}
 
 
@@ -492,7 +525,7 @@ def abs_libraries(request: Request):
 def abs_items(request: Request, lid: str, limit: int = 0, page: int = 0):
     abs_auth(request)
     _abs_tick()
-    items = [_min(it) for it in ABS["items"].values()]
+    items = [_min(it) for it in ABS["items"].values() if it["lib"] == lid]
     if limit:
         chunk = items[page * limit:(page + 1) * limit]
     else:
@@ -513,7 +546,8 @@ def abs_watcher(request: Request, body: dict = Body(...)):
 @app.post("/abs/api/libraries/{lid}/scan")
 def abs_scan(request: Request, lid: str):
     abs_auth(request)
-    for marker in ABS_LOCAL.rglob(".narratarr.json"):
+    local = next(r[2] for r in ROOTS if r[0] == lid)
+    for marker in local.rglob(".narratarr.json"):
         ABS["pending"].append((time.time() + 1, marker.parent))
     return JSONResponse("OK")
 
@@ -568,7 +602,8 @@ def abs_cover(request: Request, iid: str):
 if __name__ == "__main__":
     gen_media()
     DL.mkdir(parents=True, exist_ok=True)
-    shutil.rmtree(ABS_LOCAL, ignore_errors=True)
-    ABS_LOCAL.mkdir(parents=True, exist_ok=True)
+    for _lib, _remote, local in ROOTS:
+        shutil.rmtree(local, ignore_errors=True)
+        local.mkdir(parents=True, exist_ok=True)
     _abs_seed()
     uvicorn.run(app, host="127.0.0.1", port=PORT, log_level="warning")

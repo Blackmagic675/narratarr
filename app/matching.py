@@ -19,6 +19,7 @@ from typing import Any
 from rapidfuzz import fuzz
 
 AUDIO_EXTS = {"m4b", "mp3", "m4a", "flac", "opus", "ogg", "aac", "wma", "wav", "mp4"}
+EBOOK_EXTS = {"epub", "azw3", "azw", "mobi", "pdf", "kepub", "fb2", "cbz", "cbr", "djvu", "lit"}
 STOPWORDS = {"the", "a", "an", "of", "and", "to", "in", "on", "at", "for", "with", "by", "from", "is", "de", "la", "le"}
 DISC_DIR_RE = re.compile(r"^(?:cd|dis[ck]|part|pt|teil)[\s._-]*\d{1,3}\b.*$", re.I)
 DISC_SUFFIX_RE = re.compile(r"^(?P<base>.+?)[\s._-]*[\[(]?(?:cd|dis[ck])[\s._-]*\d{1,3}[\])]?$", re.I)
@@ -341,6 +342,101 @@ def bitrate_kbps(cand: dict) -> int | None:
         return round(cand["size"] * 8 / length / 1000)
     rates = [f["bitrate"] for f in cand.get("files") or [] if f.get("bitrate")]
     return round(sum(rates) / len(rates)) if rates else None
+
+
+def score_ebook(cand: dict, book: dict, ctx: dict) -> None:
+    """Ebooks have no runtime, so title and author carry the score, then format preference."""
+    reasons: list[str] = []
+    f = cand["files"][0]
+    dir_parts = split_remote(cand["directory"])
+    stem = f["name"].rsplit(".", 1)[0]
+    near_tokens = set(tokens(" ".join(dir_parts[-1:]) + " " + stem))
+    full_tokens = set(tokens(" ".join(dir_parts) + " " + stem))
+
+    cov = coverage(ctx["title_sig"], set(tokens(stem)))
+    tsr = fuzz.token_set_ratio(norm(ctx["short_title"]), norm(stem))
+    title_score = 0.65 * cov * 100 + 0.35 * tsr
+    if cov < 0.5:
+        cov_near = coverage(ctx["title_sig"], near_tokens)
+        title_score = max(title_score, 0.85 * (0.65 * cov_near * 100 + 0.35 * tsr))
+    reasons.append(f"title {title_score:.0f}")
+
+    author_score = 50.0
+    if ctx["author_last"]:
+        author_score = 100.0 if ctx["author_last"] in full_tokens else \
+            80.0 if coverage([ctx["author_last"]], full_tokens) > 0 else 0.0
+        reasons.append("author ✓" if author_score else "author ✗")
+
+    fmts = ctx["formats"]
+    ext = f["ext"]
+    cand["formats"] = [ext]
+    cand["length_s"] = None
+    cand["kbps"] = None
+    idx = fmts.index(ext) if ext in fmts else len(fmts)
+    format_score = max(0.0, 100.0 - idx * 25)
+    reasons.append(ext)
+
+    avail = 40.0 + (40 if cand["free_slot"] else 0) + (10 if cand["queue_length"] <= 0 else 0)
+    avail += 10 if cand["upload_speed"] >= 1_000_000 else (-20 if cand["upload_speed"] < 50_000 else 0)
+    reasons.append("free slot" if cand["free_slot"] else f"queue {cand['queue_length']}")
+
+    score = 0.55 * title_score + 0.25 * author_score + 0.12 * format_score + 0.08 * avail
+
+    if f["size"] and f["size"] < 20_000:
+        score -= 20
+        reasons.append("tiny file ✗")
+    if {"sample", "preview", "excerpt"} & near_tokens:
+        score -= 30
+        reasons.append("sample ✗")
+    path_norm = " " + " ".join(sorted(full_tokens)) + " "
+    if " abridged " in path_norm and " unabridged " not in path_norm:
+        score -= 15
+        reasons.append("abridged ✗")
+    seq = ctx["sequence"]
+    if seq:
+        found = {m.group(1).lstrip("0") or "0" for m in SEQ_IN_PATH_RE.finditer(dir_parts[-1] + " " + stem if dir_parts else stem)}
+        if found:
+            if seq.lstrip("0") in found:
+                score += 3
+            elif len(found) == 1:
+                score -= 20
+                reasons.append(f"book #{found.pop()} ≠ #{seq}")
+
+    cand["score"] = round(max(0.0, min(100.0, score)), 1)
+    cand["rank"] = round(score, 2)
+    cand["reasons"] = reasons
+
+
+def build_ebook_candidates(responses: list[dict], book: dict, ctx: dict, query: str = "") -> list[dict]:
+    """One candidate per ebook file: a book is a single file, and one folder often holds a whole shelf."""
+    out: list[dict] = []
+    for resp in responses:
+        user = resp.get("username")
+        if not user:
+            continue
+        for f in resp.get("files") or []:
+            parts = split_remote(f.get("filename", ""))
+            if len(parts) < 2:
+                continue
+            ext = (f.get("extension") or parts[-1].rsplit(".", 1)[-1]).lower().lstrip(".")
+            if ext not in ctx["formats"]:
+                continue
+            directory = "\\".join(parts[:-1])
+            entry = _file_entry(f, directory)
+            cid = hashlib.sha1(f"{user}|{entry['filename']}".encode()).hexdigest()[:12]
+            cand: dict[str, Any] = {
+                "id": cid, "username": user, "directory": directory,
+                "display_dir": f"{directory}\\{entry['name']}",
+                "files": [entry], "file_count": 1, "size": entry["size"],
+                "free_slot": bool(resp.get("hasFreeUploadSlot")),
+                "queue_length": int(resp.get("queueLength") or 0),
+                "upload_speed": int(resp.get("uploadSpeed") or 0),
+                "subset": False, "query": query, "media": "ebook",
+            }
+            score_ebook(cand, book, ctx)
+            out.append(cand)
+    out.sort(key=lambda c: (c["rank"], c["free_slot"], c["upload_speed"]), reverse=True)
+    return out
 
 
 def scoring_context(book: dict, formats: list[str], tolerance_pct: float, alt_narrators: list[str] | None = None) -> dict:

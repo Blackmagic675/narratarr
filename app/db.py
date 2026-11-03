@@ -110,6 +110,12 @@ MIGRATIONS: list[str] = [
     CREATE INDEX abs_items_asin ON abs_items(asin);
     CREATE INDEX abs_items_key ON abs_items(match_key);
     """,
+    # 3 — ebooks alongside audiobooks
+    """
+    ALTER TABLE jobs ADD COLUMN media TEXT NOT NULL DEFAULT 'audiobook';    -- audiobook | ebook
+    ALTER TABLE library ADD COLUMN media TEXT NOT NULL DEFAULT 'audiobook';
+    ALTER TABLE abs_items ADD COLUMN media TEXT NOT NULL DEFAULT 'audiobook';
+    """,
 ]
 
 

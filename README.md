@@ -52,6 +52,10 @@
   **Re-encode** button on any Library or Audiobookshelf book. See [Re-encoding](#re-encoding).
 - **Manual Import:** point it at any folder of audio, match it to an Audible release, and it gets the same treatment.
 
+- **Ebooks too:** switch Search to **Ebooks** to request the written edition. Ebooks are matched one file at a time by
+  title, author and format (epub first by default, then azw3, mobi and pdf), filed under `completed-ebooks/`, and, if
+  you pick an ebook library in Settings, sent to that separate Audiobookshelf library. See [Ebooks](#ebooks).
+
 Narratarr is on-demand only: there's no author or new-release monitoring.
 
 | Queue | Library | Picking a source |
@@ -247,6 +251,26 @@ library as separate sections.
 
 Each book folder also gets `cover.jpg`, `desc.txt`, `reader.txt`, `metadata.opf` and an Audiobookshelf-format
 `metadata.json`, so the scanner picks up the right metadata even without the API.
+
+## Ebooks
+
+Search has an **Audiobooks / Ebooks** switch. In ebook mode:
+
+- Results are one per title and author. The different narrations Audible lists are merged, and narrator and runtime are
+  hidden. With Hardcover enabled, books that have no audio edition show up too.
+- Each ebook file on Soulseek is its own candidate, because a single folder often holds an author's whole shelf. Files
+  are scored on title (filename first, then folder), author, format and peer availability. Series numbers in the
+  filename that don't match are penalised, and so are tiny files and samples. Audio files are never offered.
+- Format preference comes from **Matching → Ebook formats** (default `epub,azw3,mobi,pdf`, preferred first). Formats
+  not listed are ignored.
+- Finished ebooks go to `completed-ebooks/<folder template>/` with `cover.jpg`, `metadata.opf`, `metadata.json` and
+  `desc.txt`. Nothing is tagged or re-encoded, and filenames are kept.
+- To send them to Audiobookshelf, pick **Ebook library** (a book library separate from your audiobooks), its folder, and
+  its mount path in Settings → Audiobookshelf. Leave it blank to keep ebooks in Narratarr. Mount that folder into the
+  container the same way as the audiobook library.
+- An audiobook and an ebook of the same title are separate requests and don't block each other.
+
+Manual Import is still audio-only.
 
 ## Re-encoding
 

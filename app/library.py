@@ -9,12 +9,14 @@ from pathlib import Path
 from .matching import AUDIO_EXTS, DISC_DIR_RE, suggest_query_from_folder
 
 
-def rescan(db, completed: Path) -> dict:
+def rescan(db, completed: Path, completed_ebooks: Path | None = None) -> dict:
     """Rebuild library rows from .narratarr.json markers; drop rows whose folder is gone."""
     added = updated = removed = 0
     seen: set[str] = set()
-    if completed.exists():
-        for marker in completed.rglob(".narratarr.json"):
+    for root, media in ((completed, "audiobook"), (completed_ebooks, "ebook")):
+        if not root or not root.exists():
+            continue
+        for marker in root.rglob(".narratarr.json"):
             try:
                 data = json.loads(marker.read_text(encoding="utf-8"))
             except (OSError, ValueError):
@@ -29,7 +31,7 @@ def rescan(db, completed: Path) -> dict:
                 "narrators": book.get("narrators") or [], "series": book.get("series") or [],
                 "path": path, "cover_path": str(marker.parent / "cover.jpg") if (marker.parent / "cover.jpg").exists() else None,
                 "file_count": summary.get("file_count"), "size_bytes": summary.get("size_bytes"),
-                "duration_s": summary.get("duration_s"), "book": book,
+                "duration_s": summary.get("duration_s"), "book": book, "media": data.get("media") or media,
             }
             row = db.one("SELECT id FROM library WHERE path=?", (path,))
             if row:

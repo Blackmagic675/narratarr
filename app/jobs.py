@@ -20,7 +20,7 @@ from rapidfuzz import fuzz
 
 from . import matching
 from .integrations.abs import AbsSync
-from .postprocess import process_book, safe_segment
+from .postprocess import process_book, process_ebook, safe_segment
 from .providers import full_metadata, get_provider
 from .providers.base import clean_contributors
 from .slskd import SlskdBusy, SlskdClient, SlskdError, transfer_failed, transfer_succeeded
@@ -90,21 +90,28 @@ class JobManager:
         return self.settings.incomplete / f"{job['id']} - {safe_segment(job['title'], 80)}"
 
     # ---------------------------------------------------------------- creation
-    def find_active(self, asin: str | None) -> dict | None:
+    def find_active(self, asin: str | None, media: str = "audiobook") -> dict | None:
         if not asin:
             return None
         marks = ",".join("?" * len(ACTIVE))
-        return self.db.one(f"SELECT * FROM jobs WHERE asin=? AND status IN ({marks})", (asin, *ACTIVE))
+        return self.db.one(f"SELECT * FROM jobs WHERE asin=? AND media=? AND status IN ({marks})",
+                           (asin, media, *ACTIVE))
 
-    def create_download(self, book: dict, user_id: str | None = None) -> int:
+    def create_download(self, book: dict, user_id: str | None = None, media: str = "audiobook") -> int:
+        media = "ebook" if media == "ebook" else "audiobook"
         book = clean_contributors(dict(book))
+        if media == "ebook":
+            # narrators and runtime describe the audio edition; they'd only mislead ebook matching
+            book.update({"narrators": [], "runtime_min": None, "runtime_ms": None, "chapters": None,
+                         "_alt_narrators": []})
         s = _book_summary(book)
         now = time.time()
         jid = self.db.insert("jobs", {
-            "kind": "download", **s, "book": book, "status": "queued", "detail": "Waiting to search",
+            "kind": "download", **s, "book": book, "media": media, "status": "queued", "detail": "Waiting to search",
             "requested_by": user_id, "created_at": now, "updated_at": now,
         })
-        self.log(jid, f"Requested {s['title']} ({s['asin']}, {s['region']})")
+        self.log(jid, f"Requested {'ebook' if media == 'ebook' else 'audiobook'} {s['title']} "
+                      f"({s['asin']}, {s['region']})")
         self.wake.set()
         return jid
 
@@ -161,6 +168,9 @@ class JobManager:
         if ident and not book.get("_enriched"):
             try:
                 full = await full_metadata(self.settings, ident, book.get("region"))
+                if full and job.get("media") == "ebook":
+                    full = {k: v for k, v in full.items()
+                            if k not in ("narrators", "runtime_min", "runtime_ms", "chapters")}
                 if full:
                     book = {**book, **{k: v for k, v in full.items() if v not in (None, [], "")}}
             except Exception as e:  # noqa: BLE001
@@ -190,9 +200,11 @@ class JobManager:
                 self.log(job["id"], f"Other narrations exist: {', '.join(sorted(set(alt)))}")
         return book, alt
 
-    def _ctx(self, book: dict, alt: list[str]) -> dict:
-        return matching.scoring_context(book, self.settings.formats(),
-                                        self.settings.get("matching.runtime_tolerance"), alt)
+    def _ctx(self, book: dict, alt: list[str], media: str = "audiobook") -> dict:
+        ctx = matching.scoring_context(book, self.settings.formats(media),
+                                       self.settings.get("matching.runtime_tolerance"), alt)
+        ctx["media"] = media
+        return ctx
 
     def _merge(self, existing: list[dict], new: list[dict]) -> list[dict]:
         by_id = {c["id"]: c for c in existing}
@@ -208,7 +220,8 @@ class JobManager:
             query, s.get("slskd.search_seconds"), s.get("slskd.response_limit"),
             s.get("slskd.max_peer_queue"), s.get("slskd.cleanup"),
         )
-        cands = matching.build_candidates(responses, book, ctx, query)
+        build = matching.build_ebook_candidates if ctx.get("media") == "ebook" else matching.build_candidates
+        cands = build(responses, book, ctx, query)
         best = cands[0]["score"] if cands else 0
         job = self.get(job_id)
         attempts = (job.get("attempts") or []) + [{
@@ -224,7 +237,7 @@ class JobManager:
             return
         self.update(job_id, status="searching", detail="Preparing", error=None)
         book, alt = await self._prepare_book(job)
-        ctx = self._ctx(book, alt)
+        ctx = self._ctx(book, alt, job.get("media") or "audiobook")
         queries = queries or matching.build_queries(book, self.settings.get("matching.max_queries"))
         min_score = self.settings.get("matching.min_score")
         candidates = (job.get("candidates") or []) if force_review else []
@@ -633,11 +646,17 @@ class JobManager:
                       "remote_dir": selected.get("display_dir"), "score": selected.get("score"),
                       "query": selected.get("query"), "local_source": str(src) if job["kind"] == "import" else None}
             clean_book = {k: v for k, v in book.items() if not k.startswith("_")}
-            summary = await process_book(src, clean_book, self.settings, copy=job.get("import_mode") == "copy",
-                                         source_info=source, log_fn=lambda m: self.log(job_id, m),
-                                         progress_fn=lambda pct: self.update(job_id, detail=f"Re-encoding to M4B · {pct}%"))
+            media = job.get("media") or "audiobook"
+            if media == "ebook":
+                self.update(job_id, detail="Organising")
+                summary = await process_ebook(src, clean_book, self.settings, copy=job.get("import_mode") == "copy",
+                                              source_info=source, log_fn=lambda m: self.log(job_id, m))
+            else:
+                summary = await process_book(src, clean_book, self.settings, copy=job.get("import_mode") == "copy",
+                                             source_info=source, log_fn=lambda m: self.log(job_id, m),
+                                             progress_fn=lambda pct: self.update(job_id, detail=f"Re-encoding to M4B · {pct}%"))
             self._library_upsert(job, clean_book, summary)
-            send = self.abs.enabled
+            send = self.abs.enabled_for(media)
             self.update(job_id, status="completed", output_path=summary["path"], progress=100,
                         detail=f"Imported to {summary['path']}", abs_status="pending" if send else None,
                         abs_detail="Sending to Audiobookshelf" if send else None)
@@ -709,6 +728,7 @@ class JobManager:
             now = time.time()
             jid = self.db.insert("jobs", {
                 "kind": "import", **_book_summary(book), "book": book, "status": "completed",
+                "media": row.get("media") or "audiobook",
                 "detail": "Sending to Audiobookshelf", "output_path": row["path"], "created_at": now, "updated_at": now,
             })
             self.db.update("library", row["id"], {"job_id": jid})
@@ -747,7 +767,7 @@ class JobManager:
             "narrators": book.get("narrators") or [], "series": book.get("series") or [],
             "path": summary["path"], "cover_path": summary.get("cover_path"), "file_count": summary["file_count"],
             "size_bytes": summary["size_bytes"], "duration_s": summary["duration_s"], "book": book,
-            "source": job["kind"], "added_at": time.time(),
+            "source": job["kind"], "added_at": time.time(), "media": job.get("media") or "audiobook",
         }
         existing = self.db.one("SELECT id FROM library WHERE path=?", (summary["path"],))
         if existing:

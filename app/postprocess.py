@@ -20,7 +20,7 @@ from xml.sax.saxutils import escape
 
 import httpx
 
-from .matching import AUDIO_EXTS, natural_key
+from .matching import AUDIO_EXTS, EBOOK_EXTS, natural_key
 from .tagging import audio_length, tag_book
 
 log = logging.getLogger(__name__)
@@ -266,6 +266,65 @@ async def process_book(src: Path, book: dict, settings, *, copy: bool = False, s
     (dest / ".narratarr.json").write_text(json.dumps({
         "version": 1, "imported_at": time.time(), "book": book, "source": source_info or {}, "summary": summary,
     }, indent=2, ensure_ascii=False), encoding="utf-8")
+
+    if src.is_dir() and not copy:
+        _prune_empty(src)
+    return summary
+
+
+def ebook_files(root: Path, formats: list[str] | None = None) -> list[Path]:
+    exts = set(formats or EBOOK_EXTS)
+    files = [p for p in root.rglob("*") if p.is_file() and p.suffix.lower().lstrip(".") in exts]
+    return sorted(files, key=lambda p: natural_key(str(p.relative_to(root))))
+
+
+async def process_ebook(src: Path, book: dict, settings, *, copy: bool = False, source_info: dict | None = None,
+                        log_fn=log.info) -> dict:
+    """File an ebook into completed-ebooks/<template>/ with cover and sidecars. No tagging or re-encoding."""
+    if not src.exists():
+        raise FileNotFoundError(f"Source folder missing: {src}")
+    files = ebook_files(src) if src.is_dir() else [src]
+    if not files:
+        raise RuntimeError("No ebook files found to import")
+    base = src if src.is_dir() else src.parent
+    book = {k: v for k, v in book.items() if k not in ("narrators", "chapters", "runtime_ms", "runtime_min")}
+
+    dest = unique_dest(settings.completed_ebooks / render_template(settings.get("paths.template"), book),
+                       book.get("asin"))
+    dest.mkdir(parents=True, exist_ok=True)
+    log_fn(f"Destination: {dest}")
+
+    moved: list[Path] = []
+    for p in files:
+        target = dest / (p.relative_to(base) if src.is_dir() else Path(p.name))
+        _move_or_copy(p, target, copy)
+        moved.append(target)
+
+    if settings.get("processing.save_cover"):
+        cover = await fetch_cover(book.get("cover_url"))
+        if cover:
+            (dest / "cover.jpg").write_bytes(cover)
+        else:
+            log_fn("No cover art available from the provider")
+
+    if settings.get("processing.sidecars"):
+        if book.get("description"):
+            (dest / "desc.txt").write_text(book["description"] + "\n", encoding="utf-8")
+        (dest / "metadata.opf").write_text(_opf(book), encoding="utf-8")
+        (dest / "metadata.json").write_text(json.dumps(_abs_metadata(book, False), indent=2, ensure_ascii=False),
+                                            encoding="utf-8")
+
+    summary = {
+        "path": str(dest), "file_count": len(moved), "size_bytes": sum(p.stat().st_size for p in moved),
+        "duration_s": None, "cover_path": str(dest / "cover.jpg") if (dest / "cover.jpg").exists() else None,
+        "chapters": None, "media": "ebook",
+        "formats": sorted({p.suffix.lower().lstrip(".") for p in moved}),
+    }
+    (dest / ".narratarr.json").write_text(json.dumps({
+        "version": 1, "media": "ebook", "imported_at": time.time(), "book": book, "source": source_info or {},
+        "summary": summary,
+    }, indent=2, ensure_ascii=False), encoding="utf-8")
+    log_fn(f"Filed {len(moved)} ebook file(s): {', '.join(p.name for p in moved)}")
 
     if src.is_dir() and not copy:
         _prune_empty(src)

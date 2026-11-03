@@ -31,7 +31,7 @@ from pathlib import Path, PurePosixPath
 
 import httpx
 
-from ..matching import last_name, norm, short_title
+from ..matching import EBOOK_EXTS, last_name, norm, short_title
 
 log = logging.getLogger(__name__)
 
@@ -243,6 +243,22 @@ class AbsSync:
         s = self.settings
         return bool(s.get("abs.enabled") and s.get("abs.url") and s.get("abs.token") and s.get("abs.library_id"))
 
+    def enabled_for(self, media: str | None) -> bool:
+        if media == "ebook":
+            return self.enabled and bool(self.settings.get("abs.ebook_library_id"))
+        return self.enabled
+
+    def library_id(self, media: str | None) -> str:
+        return self.settings.get("abs.ebook_library_id" if media == "ebook" else "abs.library_id")
+
+    def libraries_to_index(self) -> list[tuple[str, str]]:
+        """[(library id, media)] — the audiobook library, plus the ebook library when it's a different one."""
+        out = [(self.settings.get("abs.library_id"), "audiobook")]
+        eb = self.settings.get("abs.ebook_library_id")
+        if eb and eb != out[0][0]:
+            out.append((eb, "ebook"))
+        return out
+
     def client(self) -> AbsClient:
         return AbsClient(self.settings.get("abs.url"), self.settings.get("abs.token"))
 
@@ -281,17 +297,19 @@ class AbsSync:
         }
         return book, item
 
-    async def target_folder(self) -> tuple[dict, Path]:
-        """(ABS folder {id, path}, local path inside Narratarr)."""
+    async def target_folder(self, media: str | None = None) -> tuple[dict, Path]:
+        """(ABS folder {id, path}, local path inside Narratarr) for audiobooks, or ebooks."""
+        ebook = media == "ebook"
         libs = await self.client().libraries()
-        lib = next((l for l in libs if l["id"] == self.settings.get("abs.library_id")), None)
+        lib = next((l for l in libs if l["id"] == self.library_id(media)), None)
         if not lib:
-            raise AbsError("The selected Audiobookshelf library no longer exists — pick one in Settings")
+            raise AbsError(f"The selected Audiobookshelf {'ebook ' if ebook else ''}library no longer exists — "
+                           "pick one in Settings")
         if not lib["folders"]:
             raise AbsError(f"Library “{lib['name']}” has no folders")
-        fid = self.settings.get("abs.folder_id")
+        fid = self.settings.get("abs.ebook_folder_id" if ebook else "abs.folder_id")
         folder = next((f for f in lib["folders"] if f["id"] == fid), None) or lib["folders"][0]
-        local = Path(self.settings.get("abs.local_path") or folder["path"])
+        local = Path(self.settings.get("abs.ebook_local_path" if ebook else "abs.local_path") or folder["path"])
         if not local.is_dir():
             raise AbsError(f"Audiobookshelf folder {folder['path']} isn't mounted in Narratarr at {local} — "
                            f"add a volume for it, or set “That folder, as mounted in Narratarr”")
@@ -304,10 +322,12 @@ class AbsSync:
         if not self.enabled:
             return 0
         async with self._lock:
-            lib_id = self.settings.get("abs.library_id")
             self.syncing = True
+            fetched: list[tuple[str, str, dict]] = []
             try:
-                items = await self.client().library_items(lib_id)
+                for lib_id, kind in self.libraries_to_index():
+                    for it in await self.client().library_items(lib_id):
+                        fetched.append((lib_id, kind, it))
             except Exception as e:  # noqa: BLE001
                 self.last_error = str(e)
                 raise
@@ -315,7 +335,7 @@ class AbsSync:
                 self.syncing = False
             via = {r["item_id"] for r in self.db.query("SELECT item_id FROM abs_links")}
             rows = []
-            for it in items:
+            for lib_id, kind, it in fetched:
                 media = it.get("media") or {}
                 m = media.get("metadata") or {}
                 authors = [a.strip() for a in (m.get("authorName") or "").split(",") if a.strip()]
@@ -333,6 +353,7 @@ class AbsSync:
                     "num_tracks": media.get("numTracks"), "size_bytes": it.get("size"), "path": it.get("path"),
                     "has_cover": 1 if media.get("coverPath") else 0,
                     "added_at": (it.get("addedAt") or 0) / 1000, "via_narratarr": 1 if it["id"] in via else 0,
+                    "media": kind,
                 })
             self.db.execute("DELETE FROM abs_items")
             for r in rows:
@@ -340,22 +361,25 @@ class AbsSync:
             self.last_sync, self.last_error = time.time(), None
             return len(rows)
 
-    def lookup(self, asin: str | None, title: str | None, author: str | None) -> dict | None:
+    def lookup(self, asin: str | None, title: str | None, author: str | None,
+               media: str = "audiobook") -> dict | None:
         """Match a release to an ABS item: by ASIN, else title + author surname.
 
         A title match is only trusted when the ABS item has no ASIN (or we have none), so a
         different narration of the same title already in ABS isn't reported as this one.
+        Ebooks have no narration, so any title + author match counts.
         """
         if asin:
-            row = self.db.one("SELECT * FROM abs_items WHERE asin=?", (asin.upper(),))
+            row = self.db.one("SELECT * FROM abs_items WHERE asin=? AND media=?", (asin.upper(), media))
             if row:
                 return row
         if not title:
             return None
         key = match_key(title, author)
-        if asin:
-            return self.db.one("SELECT * FROM abs_items WHERE match_key=? AND (asin IS NULL OR asin='')", (key,))
-        return self.db.one("SELECT * FROM abs_items WHERE match_key=?", (key,))
+        if asin and media != "ebook":
+            return self.db.one("SELECT * FROM abs_items WHERE match_key=? AND media=? AND (asin IS NULL OR asin='')",
+                               (key, media))
+        return self.db.one("SELECT * FROM abs_items WHERE match_key=? AND media=?", (key, media))
 
     async def _wait_for_item(self, client: AbsClient, lib_id: str, abs_path: str, timeout: float) -> dict | None:
         deadline = time.monotonic() + timeout
@@ -371,14 +395,17 @@ class AbsSync:
     async def import_book(self, job: dict, log_fn) -> dict:
         """Returns {"status": imported|pending, "item_id", "detail", "path"}. Raises nothing for ABS problems."""
         s = self.settings
+        media = job.get("media") or "audiobook"
         book = {k: v for k, v in (job.get("book") or {}).items() if not k.startswith("_")}
         src = Path(job["output_path"])
         delete = bool(s.get("abs.delete_after_import"))
         try:
             client = self.client()
-            lib_id = s.get("abs.library_id")
-            folder, local_root = await self.target_folder()
-            completed = s.completed.resolve()
+            lib_id = self.library_id(media)
+            if not lib_id:
+                raise AbsError("No Audiobookshelf ebook library is set — pick one in Settings")
+            folder, local_root = await self.target_folder(media)
+            completed = s.completed_for(media).resolve()
             already_there = local_root.resolve() in src.resolve().parents
             if already_there:
                 dest = src
@@ -393,7 +420,8 @@ class AbsSync:
                 log_fn(f"{'Moved' if delete else 'Copied'} into Audiobookshelf folder: {dest}")
             abs_dir = str(PurePosixPath(folder["path"]) / dest.relative_to(local_root).as_posix())
 
-            audio = sorted(p for p in dest.rglob("*") if p.is_file() and p.suffix.lower().lstrip(".") in AUDIO_EXTS)
+            exts = EBOOK_EXTS if media == "ebook" else AUDIO_EXTS
+            audio = sorted(p for p in dest.rglob("*") if p.is_file() and p.suffix.lower().lstrip(".") in exts)
             abs_files = [str(PurePosixPath(folder["path"]) / p.relative_to(local_root).as_posix()) for p in audio]
             try:
                 await client.notify_added(lib_id, abs_files)
@@ -417,7 +445,7 @@ class AbsSync:
             log_fn(f"Audiobookshelf metadata: {('filled ' + ', '.join(filled)) if filled else 'already complete'}")
             for c in conflicts:
                 log_fn(f"Kept Audiobookshelf's {c}")
-            chapters = chapters_payload(book, full)
+            chapters = chapters_payload(book, full) if media != "ebook" else None
             if chapters:
                 await client.set_chapters(item_id, chapters)
                 log_fn(f"Added {len(chapters)} Audible chapters in Audiobookshelf")

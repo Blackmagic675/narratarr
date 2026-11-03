@@ -180,19 +180,30 @@ function closeModal() {
 function escClose(e) { if (e.key === "Escape") closeModal(); }
 
 // ================================================================== SEARCH
-let lastSearch = { q: "", results: null };
+let lastSearch = { q: "", results: null, media: "audiobook" };
 
 function renderSearch(view) {
   const input = h("input", { type: "search", placeholder: "Title, author, narrator or ASIN…", value: lastSearch.q, autofocus: true });
   const results = h("div", { class: "results" });
   const info = h("div", { class: "muted", style: { marginBottom: "10px" } });
   const form = h("form", { class: "searchbar", onsubmit: (e) => { e.preventDefault(); run(); } }, input, h("button", { class: "btn primary" }, "Search"));
+  const MEDIA = [["audiobook", "Audiobooks"], ["ebook", "Ebooks"]];
+  const mediaTabs = h("div", { class: "tabs media-tabs", role: "tablist", "aria-label": "What to search for" }, MEDIA.map(([m, label]) =>
+    h("button", { type: "button", "data-media": m, class: lastSearch.media === m ? "on" : "", onclick: () => setMedia(m) }, label)));
+  function setMedia(m) {
+    if (lastSearch.media === m) return;
+    lastSearch.media = m;
+    mediaTabs.querySelectorAll("button").forEach((b) => b.classList.toggle("on", b.dataset.media === m));
+    input.placeholder = m === "ebook" ? "Title, author or ISBN…" : "Title, author, narrator or ASIN…";
+    if (input.value.trim()) run(); else clear();
+  }
+  if (lastSearch.media === "ebook") input.placeholder = "Title, author or ISBN…";
   let seq = 0;      // ignores responses from searches that were superseded or cleared
   let rows = [];    // [{ book, setState }] for live status updates
 
   function clear() {
     seq++;
-    lastSearch = { q: "", results: null };
+    lastSearch = { q: "", results: null, media: lastSearch.media };
     rows = [];
     info.textContent = "";
     results.replaceChildren();
@@ -208,7 +219,7 @@ function renderSearch(view) {
     results.replaceChildren(h("div", { class: "muted" }, h("span", { class: "spinner" }), "  Searching…"));
     info.textContent = "";
     try {
-      const data = await api(`/api/search?q=${encodeURIComponent(q)}`);
+      const data = await api(`/api/search?q=${encodeURIComponent(q)}&media=${lastSearch.media}`);
       if (mine !== seq) return;
       lastSearch.results = data;
       draw(data);
@@ -234,7 +245,7 @@ function renderSearch(view) {
     if (!rows.length) return;
     const mine = seq;
     try {
-      const st = await api("/api/search/status", { method: "POST", body: { items: rows.map((r) => ({ asin: r.book.asin, ref: r.book.ref, title: r.book.title, authors: r.book.authors })) } });
+      const st = await api("/api/search/status", { method: "POST", body: { media: lastSearch.media, items: rows.map((r) => ({ asin: r.book.asin, ref: r.book.ref, title: r.book.title, authors: r.book.authors })) } });
       if (mine !== seq) return;
       for (const r of rows) {
         const x = st[r.book.ref || r.book.asin];
@@ -247,34 +258,35 @@ function renderSearch(view) {
   }
 
   view.append(
-    h("div", { class: "page-head" }, h("div", {}, h("h1", {}, "Search"), h("div", { class: "sub" }, "Find a release, then request it from Soulseek."))),
+    h("div", { class: "page-head" }, h("div", {}, h("h1", {}, "Search"), h("div", { class: "sub" }, "Find a release, then request it from Soulseek.")), mediaTabs),
     form, info, results,
   );
-  if (lastSearch.results) { draw(lastSearch.results); refreshStatus(); }
+  if (lastSearch.results && (lastSearch.results.media || "audiobook") === lastSearch.media) { draw(lastSearch.results); refreshStatus(); }
   const timer = setInterval(refreshStatus, 4000);
   pageCleanup = () => clearInterval(timer);
 }
 
 function resultRow(b) {
+  const ebook = b.media === "ebook";
   const act = h("div", { class: "actions" });
   const setState = () => {
     act.replaceChildren();
     if (b.in_abs) act.append(absPill(b.in_abs));
-    if (b.in_library) act.append(h("span", { class: "pill", style: { color: "var(--ok)" } }, "✓ In Narratarr library"));
+    if (b.in_library) act.append(h("span", { class: "pill", style: { color: "var(--ok)" } }, ebook ? "✓ Ebook in Narratarr" : "✓ In Narratarr library"));
     const owned = b.in_library || b.in_abs;
     if (b.job && !["completed", "cancelled"].includes(b.job.status)) act.append(h("a", { class: "btn small ghost", href: "/queue", "data-link": true }, status(b.job.status)));
-    else act.append(h("button", { class: `btn ${owned ? "" : "primary"}`, onclick: request }, owned ? "Request again" : "Request"));
+    else act.append(h("button", { class: `btn ${owned ? "" : "primary"}`, onclick: request }, owned ? "Request again" : ebook ? "Request ebook" : "Request"));
   };
   async function request(e) {
     const btnEl = e.target;
     if (b.in_abs) {
       const go = await confirmDialog("Already in Audiobookshelf",
-        `“${b.in_abs.title}” is already in your Audiobookshelf library. Request it anyway?`, "Request anyway");
+        `“${b.in_abs.title}” is already in your Audiobookshelf ${ebook ? "ebook " : ""}library. Request it anyway?`, "Request anyway");
       if (!go) return;
     }
     btnEl.disabled = true;
     try {
-      const job = await api("/api/jobs", { method: "POST", body: { asin: b.asin, ref: b.ref, region: b.region, book: b } });
+      const job = await api("/api/jobs", { method: "POST", body: { asin: b.asin, ref: b.ref, region: b.region, book: b, media: ebook ? "ebook" : "audiobook" } });
       b.job = { id: job.id, status: job.status };
       toast(`Queued “${b.title}”`, "ok");
       refreshBadge();
@@ -283,7 +295,7 @@ function resultRow(b) {
   }
   setState();
   const descEl = b.description ? h("div", { class: "desc", onclick: (e) => e.currentTarget.classList.toggle("open") }, b.description) : null;
-  const abridged = b.format && b.format.toLowerCase() === "abridged";
+  const abridged = !ebook && b.format && b.format.toLowerCase() === "abridged";
   const el = h("article", { class: "result" },
     cover(b.cover_url, b.title),
     h("div", {},
@@ -291,14 +303,15 @@ function resultRow(b) {
       b.subtitle ? h("div", { class: "subtitle" }, b.subtitle) : null,
       h("div", { class: "credits" },
         h("div", {}, h("span", {}, "By "), h("b", {}, names(b.authors) || "Unknown")),
-        b.narrators?.length ? h("div", {}, h("span", {}, "Narrated by "), h("b", {}, names(b.narrators))) : null),
+        !ebook && b.narrators?.length ? h("div", {}, h("span", {}, "Narrated by "), h("b", {}, names(b.narrators))) : null),
       h("div", { class: "meta" },
         (b.series || []).map((s) => h("span", { class: "pill series" }, seriesLabel(s))),
-        fmtRuntime(b.runtime_min) ? h("span", { class: "pill" }, fmtRuntime(b.runtime_min)) : null,
+        !ebook && fmtRuntime(b.runtime_min) ? h("span", { class: "pill" }, fmtRuntime(b.runtime_min)) : null,
+        ebook && b.isbn ? h("span", { class: "pill mono" }, `ISBN ${b.isbn}`) : null,
         b.year ? h("span", { class: "pill" }, b.year) : null,
         abridged ? h("span", { class: "pill warn" }, "Abridged") : null,
-        b.region ? h("span", { class: "pill region" }, b.region) : null,
-        b.asin ? h("span", { class: "pill mono" }, b.asin) : null,
+        !ebook && b.region ? h("span", { class: "pill region" }, b.region) : null,
+        !ebook && b.asin ? h("span", { class: "pill mono" }, b.asin) : null,
         lastSearch.multi && b.sources ? h("span", { class: "pill", title: "Metadata sources for this result" }, `${b.sources.length} source${b.sources.length === 1 ? "" : "s"}`) : null),
       descEl),
     act);
@@ -348,7 +361,7 @@ function renderQueue(view) {
     return h("div", { class: "job" },
       cover(j.cover_url, j.title),
       h("div", {},
-        h("div", { class: "row" }, status(j.status), j.kind === "import" ? h("span", { class: "pill" }, "Manual import") : j.kind === "reencode" ? h("span", { class: "pill" }, "Re-encode") : null, h("span", { class: "faint", style: { fontSize: "12px" } }, ago(j.created_at))),
+        h("div", { class: "row" }, status(j.status), j.media === "ebook" ? h("span", { class: "pill ebook" }, "Ebook") : null, j.kind === "import" ? h("span", { class: "pill" }, "Manual import") : j.kind === "reencode" ? h("span", { class: "pill" }, "Re-encode") : null, h("span", { class: "faint", style: { fontSize: "12px" } }, ago(j.created_at))),
         h("div", { class: "title", style: { marginTop: "4px" } }, j.title),
         h("div", { class: "muted", style: { fontSize: "13px" } }, names(j.authors), j.narrators?.length ? ` · read by ${names(j.narrators)}` : "", j.series?.length ? ` · ${seriesLabel(j.series[0])}` : ""),
         h("div", { class: "detail" }, j.error && j.status === "failed" ? j.error : j.detail),
@@ -479,7 +492,8 @@ function renderLibrary(view) {
     const chip = b.abs_status === "imported" ? h("div", { class: "chip ok" }, "In Audiobookshelf")
       : b.abs_status === "pending" ? h("div", { class: "chip warn" }, "Audiobookshelf pending") : null;
     return h("div", { class: "tile", onclick: () => openBook(b.id, load) },
-      h("div", { class: "cover-wrap" }, cover(b.has_cover ? `/api/library/${b.id}/cover` : null, b.title), chip),
+      h("div", { class: "cover-wrap" }, cover(b.has_cover ? `/api/library/${b.id}/cover` : null, b.title), chip,
+        b.media === "ebook" ? h("div", { class: "chip ebook-chip" }, "Ebook") : null),
       h("div", { class: "t" }, b.title),
       h("div", { class: "a" }, names(b.authors)),
       b.narrators?.length ? h("div", { class: "n" }, `Read by ${names(b.narrators)}`) : null,
@@ -488,7 +502,7 @@ function renderLibrary(view) {
   function absTile(b) {
     return h("div", { class: "tile abs-tile", onclick: () => openAbsBook(b.id) },
       h("div", { class: "cover-wrap" }, cover(b.has_cover ? `/api/abs/items/${b.id}/cover` : null, b.title),
-        h("div", { class: "source-strip" }, b.via_narratarr ? "Audiobookshelf · via Narratarr" : "Audiobookshelf")),
+        h("div", { class: "source-strip" }, (b.via_narratarr ? "Audiobookshelf · via Narratarr" : "Audiobookshelf") + (b.media === "ebook" ? " · Ebook" : ""))),
       h("div", { class: "t" }, b.title),
       h("div", { class: "a" }, names(b.authors)),
       b.narrators?.length ? h("div", { class: "n" }, `Read by ${names(b.narrators)}`) : null,
@@ -753,22 +767,31 @@ async function renderSettings(view) {
   let absLibs = [];
   function fillAbs(libs) {
     absLibs = libs;
+    const books = libs.filter((l) => l.mediaType === "book");
     const sel = inputs["abs.library_id"];
     const cur = sel.value;
-    const books = libs.filter((l) => l.mediaType === "book");
     sel.replaceChildren(h("option", { value: "" }, "— choose a library —"),
       ...books.map((l) => h("option", { value: l.id, selected: l.id === cur }, `${l.name}`)));
     if (!books.find((l) => l.id === cur) && books.length === 1) sel.value = books[0].id;
+    const esel = inputs["abs.ebook_library_id"];
+    if (esel) {
+      const ecur = esel.value;
+      esel.replaceChildren(h("option", { value: "" }, "— none: keep ebooks in Narratarr —"),
+        ...books.map((l) => h("option", { value: l.id, selected: l.id === ecur }, `${l.name}`)));
+    }
     fillFolders();
   }
   function fillFolders() {
-    const sel = inputs["abs.folder_id"];
-    const cur = sel.value;
-    const lib = absLibs.find((l) => l.id === inputs["abs.library_id"].value);
-    const folders = lib ? lib.folders : [];
-    sel.replaceChildren(...(folders.length ? folders.map((f) => h("option", { value: f.id, selected: f.id === cur }, f.path))
-      : [h("option", { value: "" }, lib ? "Library has no folders" : "Choose a library first")]));
-    if (folders.length && !folders.find((f) => f.id === cur)) sel.value = folders[0].id;
+    for (const [libKey, folderKey] of [["abs.library_id", "abs.folder_id"], ["abs.ebook_library_id", "abs.ebook_folder_id"]]) {
+      const sel = inputs[folderKey];
+      if (!sel || !inputs[libKey]) continue;
+      const cur = sel.value;
+      const lib = absLibs.find((l) => l.id === inputs[libKey].value);
+      const folders = lib ? lib.folders : [];
+      sel.replaceChildren(...(folders.length ? folders.map((f) => h("option", { value: f.id, selected: f.id === cur }, f.path))
+        : [h("option", { value: "" }, lib ? "Library has no folders" : "Choose a library first")]));
+      if (folders.length && !folders.find((f) => f.id === cur)) sel.value = folders[0].id;
+    }
   }
   if (inputs["abs.token"]?.value) api("/api/abs/libraries").then(fillAbs).catch(() => {});
 

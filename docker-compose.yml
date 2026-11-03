@@ -16,6 +16,6 @@ services:
       NARRATARR_METADATA__REGION: us
     volumes:
       - ./config:/config                                  # database + settings
-      - ./downloads:/downloads                            # incomplete/ and completed/
+      - ./downloads:/downloads                            # incomplete/, completed/ and completed-ebooks/
       - /path/to/slskd/downloads:/slskd-downloads         # slskd's completed-downloads folder
       - /path/to/audiobooks:/audiobooks                   # optional: your Audiobookshelf library folder
