@@ -18,7 +18,7 @@ from .providers import full_metadata, get_provider
 
 router = APIRouter(prefix="/api", dependencies=[Depends(current_user)])
 
-LIGHT_JOB_COLS = ("id, kind, asin, region, title, subtitle, authors, narrators, series, runtime_min, cover_url, "
+LIGHT_JOB_COLS = ("id, kind, media, asin, region, title, subtitle, authors, narrators, series, runtime_min, cover_url, "
                   "status, detail, progress, selected, transfers, output_path, error, abs_status, abs_detail, abs_item_id, "
                   "created_at, updated_at")
 
@@ -91,36 +91,43 @@ def _writable(p: Path) -> bool:
 
 
 # ------------------------------------------------------------------- search
-def _annotate(request: Request, results: list[dict]) -> None:
+def _media(value: str | None) -> str:
+    return "ebook" if value == "ebook" else "audiobook"
+
+
+def _annotate(request: Request, results: list[dict], media: str = "audiobook") -> None:
     """Attach live state to each result: in Narratarr's library, current job, in Audiobookshelf."""
     db, _, jobs = _state(request)
     keys = sorted({k for r in results for k in (r.get("asin"), r.get("ref")) if k})
     in_lib, in_queue = set(), {}
     if keys:
         marks = ",".join("?" * len(keys))
-        in_lib = {r["asin"] for r in db.query(f"SELECT asin FROM library WHERE asin IN ({marks})", keys)}
-        for r in db.query(f"SELECT id, asin, status FROM jobs WHERE asin IN ({marks}) ORDER BY id", keys):
+        in_lib = {r["asin"] for r in db.query(f"SELECT asin FROM library WHERE media=? AND asin IN ({marks})",
+                                               [media, *keys])}
+        for r in db.query(f"SELECT id, asin, status FROM jobs WHERE media=? AND asin IN ({marks}) ORDER BY id",
+                          [media, *keys]):
             in_queue[r["asin"]] = {"id": r["id"], "status": r["status"]}
     abs_sync = jobs.abs
     for r in results:
         r["in_library"] = bool({r.get("asin"), r.get("ref")} & in_lib)
         r["job"] = in_queue.get(r.get("ref")) or in_queue.get(r.get("asin"))
         r["in_abs"] = _abs_ref(abs_sync, abs_sync.lookup(r.get("asin"), r.get("title"),
-                                                          (r.get("authors") or [{}])[0].get("name"))) \
-            if abs_sync.enabled else None
+                                                          (r.get("authors") or [{}])[0].get("name"), media)) \
+            if abs_sync.enabled_for(media) else None
 
 
 @router.get("/search")
-async def search(request: Request, q: str = Query(..., min_length=1), limit: int = 30):
+async def search(request: Request, q: str = Query(..., min_length=1), limit: int = 30, media: str = "audiobook"):
     s = _state(request)[1]
+    media = _media(media)
     hub = get_provider(s)
     try:
-        results, info = await hub.search_ex(q, limit)
+        results, info = await hub.search_ex(q, limit, media)
     except Exception as e:  # noqa: BLE001
         raise HTTPException(502, f"Lookup failed: {e}") from e
-    _annotate(request, results)
+    _annotate(request, results, media)
     return {"results": results, "sources": info["sources"], "configured_sources": hub.source_count,
-            "fallback": info["fallback"], "region": s.get("metadata.region")}
+            "fallback": info["fallback"], "region": s.get("metadata.region"), "media": media}
 
 
 @router.post("/search/status")
@@ -129,7 +136,7 @@ async def search_status(request: Request, payload: dict = Body(...)):
     items = [{"asin": i.get("asin"), "ref": i.get("ref") or i.get("asin"), "title": i.get("title"),
               "authors": i.get("authors") or []}
              for i in (payload.get("items") or [])[:100] if i.get("ref") or i.get("asin")]
-    _annotate(request, items)
+    _annotate(request, items, _media(payload.get("media")))
     return {i["ref"]: {"in_library": i["in_library"], "job": i["job"], "in_abs": i["in_abs"]} for i in items}
 
 
@@ -152,16 +159,18 @@ async def list_jobs(request: Request, scope: str = "all"):
 async def create_job(request: Request, payload: dict = Body(...), user: User = Depends(current_user)):
     _, s, jobs = _state(request)
     ref = payload.get("ref") or payload.get("asin")
+    media = _media(payload.get("media"))
     if not ref:
         raise HTTPException(400, "ref or asin required")
-    if (existing := jobs.find_active(ref)) or (payload.get("asin") and (existing := jobs.find_active(payload["asin"]))):
+    if (existing := jobs.find_active(ref, media)) or \
+            (payload.get("asin") and (existing := jobs.find_active(payload["asin"], media))):
         raise HTTPException(409, f"Already in the queue (job {existing['id']})")
     book = payload.get("book")
     if not book or (book.get("ref") or book.get("asin")) != ref:
         book = await full_metadata(s, ref, payload.get("region"))
         if not book:
             raise HTTPException(404, "Not found in the configured metadata sources")
-    jid = jobs.create_download(book, user.id)
+    jid = jobs.create_download(book, user.id, media)
     return jobs.get(jid)
 
 
@@ -268,7 +277,7 @@ async def clear_jobs(request: Request):
 @router.get("/library")
 async def library(request: Request):
     db, s, jobs = _state(request)
-    rows = db.query("SELECT id, asin, title, subtitle, authors, narrators, series, path, cover_path, file_count, "
+    rows = db.query("SELECT id, media, asin, title, subtitle, authors, narrators, series, path, cover_path, file_count, "
                     "size_bytes, duration_s, source, added_at, abs_item_id, abs_status FROM library ORDER BY added_at DESC")
     linked = set()
     for r in rows:
@@ -278,7 +287,7 @@ async def library(request: Request):
             r["abs_link"] = jobs.abs.link(r["abs_item_id"])
     abs_rows = []
     if jobs.abs.enabled:
-        for a in db.query("SELECT id, asin, title, subtitle, authors, narrators, series, duration_s, num_tracks, "
+        for a in db.query("SELECT id, media, asin, title, subtitle, authors, narrators, series, duration_s, num_tracks, "
                           "size_bytes, has_cover, added_at, via_narratarr FROM abs_items ORDER BY added_at DESC"):
             if a["id"] in linked:
                 continue
@@ -319,7 +328,7 @@ async def library_delete(request: Request, item_id: int, delete_files: bool = Fa
         raise HTTPException(404)
     if delete_files:
         p = Path(row["path"]).resolve()
-        if s.completed.resolve() not in p.parents:
+        if s.completed_for(row.get("media")).resolve() not in p.parents:
             raise HTTPException(400, "Refusing to delete outside the completed folder")
         shutil.rmtree(p, ignore_errors=True)
     db.execute("DELETE FROM library WHERE id=?", (item_id,))
@@ -329,14 +338,15 @@ async def library_delete(request: Request, item_id: int, delete_files: bool = Fa
 @router.post("/library/rescan")
 async def library_rescan(request: Request):
     db, s, _ = _state(request)
-    return await asyncio.to_thread(rescan, db, s.completed)
+    return await asyncio.to_thread(rescan, db, s.completed, s.completed_ebooks)
 
 
 @router.post("/library/{item_id}/abs")
 async def library_send_to_abs(request: Request, item_id: int):
-    jobs = _state(request)[2]
-    if not jobs.abs.enabled:
-        raise HTTPException(400, "Audiobookshelf isn't set up — see Settings")
+    db, _, jobs = _state(request)
+    row = db.one("SELECT media FROM library WHERE id=?", (item_id,)) or {}
+    if not jobs.abs.enabled_for(row.get("media")):
+        raise HTTPException(400, "Audiobookshelf isn't set up for this kind of book — see Settings")
     try:
         jid = jobs.queue_abs_for_library_item(item_id)
     except ValueError as e:
@@ -483,7 +493,7 @@ async def job_send_to_abs(request: Request, job_id: int):
     job = jobs.get(job_id)
     if not job or job["status"] != "completed":
         raise HTTPException(409, "Only completed jobs can be sent to Audiobookshelf")
-    if not jobs.abs.enabled:
+    if not jobs.abs.enabled_for(job.get("media")):
         raise HTTPException(400, "Audiobookshelf isn't set up — see Settings")
     jobs.start_abs_import(job_id)
     return {"ok": True}
@@ -574,7 +584,7 @@ async def put_settings(request: Request, payload: dict = Body(...)):
     request.app.state.health.invalidate()
     if s.get("general.check_updates") and not was_checking:
         asyncio.create_task(request.app.state.updates.check(force=True))
-    for p in (s.incomplete, s.completed):
+    for p in (s.incomplete, s.completed, s.completed_ebooks):
         try:
             p.mkdir(parents=True, exist_ok=True)
         except OSError:
@@ -628,10 +638,16 @@ async def test_connection(request: Request, target: str):
                 folder, local = await jobs.abs.target_folder()
             except Exception as e:  # noqa: BLE001
                 return {"ok": False, "message": f"Connected, but {e}", "libraries": libs}
+            msg = f"files go to {folder['path']}" + (f" (mounted here at {local})" if str(local) != folder["path"] else "")
+            if s.get("abs.ebook_library_id"):
+                try:
+                    efolder, elocal = await jobs.abs.target_folder("ebook")
+                    msg += f" · ebooks go to {efolder['path']}" + \
+                        (f" (mounted here at {elocal})" if str(elocal) != efolder["path"] else "")
+                except Exception as e:  # noqa: BLE001
+                    return {"ok": False, "message": f"Connected, but for ebooks: {e}", "libraries": libs}
             n = await jobs.abs.refresh_index()
-            return {"ok": True, "libraries": libs,
-                    "message": f"Connected · {n} books in library · files go to {folder['path']}"
-                               + (f" (mounted here at {local})" if str(local) != folder["path"] else "")}
+            return {"ok": True, "libraries": libs, "message": f"Connected · {n} books in Audiobookshelf · {msg}"}
     except Exception as e:  # noqa: BLE001
         return {"ok": False, "message": str(e) or e.__class__.__name__}
     raise HTTPException(404, "Unknown test")

@@ -65,6 +65,25 @@ def _tag(books: list[dict]) -> list[dict]:
     return books
 
 
+def ebook_results(results: list[dict]) -> list[dict]:
+    """One result per title + author, without audio-only fields. Unabridged editions are kept first."""
+    out: list[dict] = []
+    seen: dict[str, dict] = {}
+    for b in sorted(results, key=lambda b: (b.get("format") or "").lower() == "abridged"):
+        key = f"{norm(short_title(b.get('title') or ''))}|{last_name(primary_author(b))}"
+        if key in seen:
+            first = seen[key]
+            for f in FILLABLE:
+                if _empty(first.get(f)) and not _empty(b.get(f)) and f not in ("narrators", "runtime_min"):
+                    first[f] = b[f]
+            continue
+        b = {**b, "narrators": [], "runtime_min": None, "media": "ebook"}
+        b.pop("format", None)
+        seen[key] = b
+        out.append(b)
+    return out
+
+
 class MetadataHub:
     name = "hub"
 
@@ -79,11 +98,21 @@ class MetadataHub:
     def source_count(self) -> int:
         return 1 + (1 if self.hardcover else 0)
 
-    async def search_ex(self, query: str, limit: int = 25) -> tuple[list[dict], dict]:
-        """Returns (results, info). info = {sources: n answered, fallback: primary failed}."""
+    async def search_ex(self, query: str, limit: int = 25, media: str = "audiobook") -> tuple[list[dict], dict]:
+        """Returns (results, info). info = {sources: n answered, fallback: primary failed}.
+
+        media="ebook" keeps Hardcover books with no audio edition and merges the different
+        narrations of one title into a single result.
+        """
+        results, info = await self._search_ex(query, limit, media)
+        if media == "ebook":
+            results = ebook_results(results)
+        return results, info
+
+    async def _search_ex(self, query: str, limit: int, media: str) -> tuple[list[dict], dict]:
         tasks = [self.audible.search(query, limit)]
         if self.hardcover:
-            tasks.append(self.hardcover.search(query, limit))
+            tasks.append(self.hardcover.search(query, limit, media))
         res = await asyncio.gather(*tasks, return_exceptions=True)
         primary, extra = res[0], (res[1] if len(res) > 1 else None)
         if isinstance(extra, BaseException):
@@ -109,8 +138,8 @@ class MetadataHub:
         tail = [h for i, h in enumerate(extra) if i not in used and not (h.get("asin") and h["asin"].upper() in asins)]
         return primary + tail, {"sources": 2, "fallback": False}
 
-    async def search(self, query: str, limit: int = 25) -> list[dict]:
-        return (await self.search_ex(query, limit))[0]
+    async def search(self, query: str, limit: int = 25, media: str = "audiobook") -> list[dict]:
+        return (await self.search_ex(query, limit, media))[0]
 
     async def get(self, identifier: str, region: str | None = None) -> dict | None:
         ident = str(identifier or "").strip()

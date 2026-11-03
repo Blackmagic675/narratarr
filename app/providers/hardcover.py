@@ -146,7 +146,7 @@ class HardcoverProvider:
         by_id = {b["id"]: b for b in rows}
         return [normalise(by_id[i]) for i in ids if i in by_id]
 
-    async def search(self, query: str, limit: int = 25) -> list[dict]:
+    async def search(self, query: str, limit: int = 25, media: str = "audiobook") -> list[dict]:
         query = query.strip()
         if ASIN_RE.match(query):
             book = await self.get(query)
@@ -156,7 +156,7 @@ class HardcoverProvider:
         data = (await self._gql(q, {"q": query, "n": min(max(limit, 1), 25)})).get("search") or {}
         ids = [int(i) for i in (data.get("ids") or []) if str(i).isdigit()]
         books = await self._books(ids)
-        return [b for b in books if b["has_audio"]]
+        return books if media == "ebook" else [b for b in books if b["has_audio"]]
 
     async def get(self, identifier: str, region: str | None = None) -> dict | None:
         ident = str(identifier).strip()

@@ -85,6 +85,8 @@ SCHEMA: list[Setting] = [
     Setting("matching.runtime_tolerance", 8, "int", "Runtime tolerance (%)", "Matching",
             "How far a candidate's total length may drift from Audible's runtime before it's penalised."),
     Setting("matching.auto_download", True, "bool", "Download best match automatically", "Matching"),
+    Setting("matching.ebook_formats", "epub,azw3,mobi,pdf", "str", "Ebook formats (preferred first)", "Matching",
+            "Comma-separated; used for ebook requests. Anything not listed is ignored."),
 
     # --- files -------------------------------------------------------------
     Setting("paths.downloads", "/downloads", "str", "Downloads root", "Files",
@@ -128,6 +130,12 @@ SCHEMA: list[Setting] = [
     Setting("abs.local_path", "", "str", "That folder, as mounted in Narratarr", "Audiobookshelf",
             "Blank = mounted at the same path Audiobookshelf uses (recommended). "
             "Otherwise the path inside this container that points at the same host folder."),
+    Setting("abs.ebook_library_id", "", "abs_library", "Ebook library", "Audiobookshelf",
+            "A separate book library for ebooks. Blank = ebooks stay in Narratarr's completed-ebooks/ folder."),
+    Setting("abs.ebook_folder_id", "", "abs_folder", "Ebook library folder", "Audiobookshelf",
+            "Finished ebooks are filed into this folder using the folder template above."),
+    Setting("abs.ebook_local_path", "", "str", "That ebook folder, as mounted in Narratarr", "Audiobookshelf",
+            "Blank = mounted at the same path Audiobookshelf uses."),
     Setting("abs.metadata_mode", "fill", "select", "Metadata", "Audiobookshelf",
             "fill: keep Audiobookshelf's values and fill only what's missing (differences are logged). "
             "overwrite: Narratarr's Audible record replaces Audiobookshelf's.",
@@ -241,5 +249,13 @@ class SettingsStore:
     def completed(self) -> Path:
         return self.downloads / "completed"
 
-    def formats(self) -> list[str]:
-        return [f.strip().lower().lstrip(".") for f in str(self.get("matching.formats")).split(",") if f.strip()]
+    @property
+    def completed_ebooks(self) -> Path:
+        return self.downloads / "completed-ebooks"
+
+    def completed_for(self, media: str | None) -> Path:
+        return self.completed_ebooks if media == "ebook" else self.completed
+
+    def formats(self, media: str | None = None) -> list[str]:
+        key = "matching.ebook_formats" if media == "ebook" else "matching.formats"
+        return [f.strip().lower().lstrip(".") for f in str(self.get(key)).split(",") if f.strip()]
