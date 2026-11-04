@@ -103,7 +103,7 @@ class JobManager:
         if media == "ebook":
             # narrators and runtime describe the audio edition; they'd only mislead ebook matching
             book.update({"narrators": [], "runtime_min": None, "runtime_ms": None, "chapters": None,
-                         "_alt_narrators": []})
+                         "_alt_narrators": [], "ref": book.get("ref") or book.get("asin"), "asin": None})
         s = _book_summary(book)
         now = time.time()
         jid = self.db.insert("jobs", {
@@ -167,10 +167,7 @@ class JobManager:
         ident = book.get("asin") or book.get("ref")
         if ident and not book.get("_enriched"):
             try:
-                full = await full_metadata(self.settings, ident, book.get("region"))
-                if full and job.get("media") == "ebook":
-                    full = {k: v for k, v in full.items()
-                            if k not in ("narrators", "runtime_min", "runtime_ms", "chapters")}
+                full = await full_metadata(self.settings, ident, book.get("region"), job.get("media") or "audiobook")
                 if full:
                     book = {**book, **{k: v for k, v in full.items() if v not in (None, [], "")}}
             except Exception as e:  # noqa: BLE001

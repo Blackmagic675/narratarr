@@ -167,7 +167,7 @@ async def create_job(request: Request, payload: dict = Body(...), user: User = D
         raise HTTPException(409, f"Already in the queue (job {existing['id']})")
     book = payload.get("book")
     if not book or (book.get("ref") or book.get("asin")) != ref:
-        book = await full_metadata(s, ref, payload.get("region"))
+        book = await full_metadata(s, ref, payload.get("region"), media)
         if not book:
             raise HTTPException(404, "Not found in the configured metadata sources")
     jid = jobs.create_download(book, user.id, media)

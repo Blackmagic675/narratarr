@@ -500,12 +500,15 @@ def main():
         t = c.post("/api/settings/test/abs").json()
         assert t["ok"] and "ebooks go to /ebooks" in t["message"], t
         audio_hits = search(c, "paper lantern")
-        assert len(audio_hits) == 2, "audiobook search keeps both narrations"
+        assert len(audio_hits) == 3, "audiobook search keeps both narrations and the full-cast edition"
         eb = c.get("/api/search", params={"q": "paper lantern", "media": "ebook"}).json()
         assert eb["media"] == "ebook" and len(eb["results"]) == 1, [r["asin"] for r in eb["results"]]
         lantern = eb["results"][0]
         assert lantern["narrators"] == [] and lantern["runtime_min"] is None and lantern["media"] == "ebook"
-        ok("ebook search merges the two narrations into one result without narrator or runtime")
+        assert lantern["ref"] == "B0EBOOK001" and not lantern.get("asin"), lantern
+        assert not any("Full-Cast" in s["name"] for s in lantern["series"]), lantern["series"]
+        ok("ebook search merges the narrations into one result: no narrator, runtime, audiobook ASIN or "
+           "full-cast edition")
 
         r = c.post("/api/jobs", json={"asin": lantern["asin"], "ref": lantern["ref"], "region": lantern["region"],
                                       "book": lantern, "media": "ebook"})
@@ -541,6 +544,8 @@ def main():
         item = httpx.get(f"http://127.0.0.1:{MOCK_PORT}/mock/abs/items").json()[j["abs_item_id"]]
         assert item["lib"] == "lib_ebooks" and item["ebooks"] == ["Paper Lantern.epub"], item
         assert item["meta"]["narrators"] == [] and item["meta"]["series"] == [{"name": "Lantern Tales", "sequence": "1"}]
+        assert not item["meta"]["asin"] and "ASIN" not in (edest / "metadata.opf").read_text(), \
+            "the audiobook's ASIN must not be written to an ebook"
         ok("epub filed into the ebook library folder with cover and OPF, scanned, metadata filled, no narrator")
         eb2 = c.get("/api/search", params={"q": "paper lantern", "media": "ebook"}).json()["results"][0]
         assert eb2["in_abs"], "ebook search sees the ebook library"
@@ -548,6 +553,23 @@ def main():
         lib = c.get("/api/library").json()
         assert any(b["media"] == "ebook" and b["title"] == "Paper Lantern" for b in lib["audiobookshelf"])
         ok("Search and Library tell the ebook library and the audiobook library apart")
+
+        # with Hardcover on, the book's own record leads: its cover and description, not the audiobook's
+        c.put("/api/settings", json={"metadata.hardcover_enabled": True,
+                                     "metadata.hardcover_token": "hctoken"}).raise_for_status()
+        eb = c.get("/api/search", params={"q": "paper lantern", "media": "ebook"}).json()
+        assert eb["sources"] == 2 and len(eb["results"]) == 1, [r["ref"] for r in eb["results"]]
+        hb = eb["results"][0]
+        assert hb["ref"] == "hardcover:104" and hb["cover_url"].endswith("/cover/hc104.jpg"), hb
+        assert hb["description"] == "The printed story of a paper lantern." and not hb.get("asin"), hb
+        assert hb["series"] == [{"name": "Lantern Tales", "sequence": "1", "asin": None}], hb["series"]
+        r = c.post("/api/jobs", json={"ref": "hardcover:104", "media": "ebook"})
+        r.raise_for_status()
+        hj = r.json()
+        assert hj["cover_url"].endswith("/cover/hc104.jpg") and hj["book"]["description"].startswith("The printed"), hj
+        c.post(f"/api/jobs/{hj['id']}/cancel").raise_for_status()
+        c.put("/api/settings", json={"metadata.hardcover_enabled": False}).raise_for_status()
+        ok("Hardcover on: ebook results use the book's own cover and description; Audible only fills gaps")
 
         # 8 — on-demand re-encode of a Narratarr library item and an Audiobookshelf item
         print("Scenario 8: Re-encode button")
