@@ -278,9 +278,11 @@ def main():
         assert not any("editor" in a["query"] or "foreword" in a["query"] or "contributing" in a["query"]
                        for a in j["attempts"]), [a["query"] for a in j["attempts"]]
         out = Path(j["output_path"])
-        assert out.parts[-2] == "Lena Krause, Omar Field", out
+        assert out.parts[-2] == "Lena Krause", "an anthology is filed under its editor, not the foreword writer"
         t = mutagen.File(str(out / "Essays On Rivers.m4b"))
-        assert t["\xa9ART"] == ["Lena Krause, Omar Field"], t.get("\xa9ART")
+        assert t["\xa9ART"] == ["Lena Krause"], t.get("\xa9ART")
+        opf = (out / "metadata.opf").read_text()
+        assert 'opf:role="aut">Lena Krause<' in opf and 'opf:role="aui">Omar Field<' in opf, opf
         ok(f"roles split off (editor, foreword); queries {[a['query'] for a in j['attempts']]}; tags and folder clean")
 
         # 6c — Hardcover: off by default; when on, fills gaps, adds books, and is the fallback
@@ -563,6 +565,11 @@ def main():
         assert hb["ref"] == "hardcover:104" and hb["cover_url"].endswith("/cover/hc104.jpg"), hb
         assert hb["description"] == "The printed story of a paper lantern." and not hb.get("asin"), hb
         assert hb["series"] == [{"name": "Lantern Tales", "sequence": "1", "asin": None}], hb["series"]
+        assert [(a["name"], a["role"]) for a in hb["authors"]] == [("Ella Page", None), ("Ivo Sketch", "illustrator")]
+        sys.path.insert(0, str(ROOT))
+        from app.postprocess import _opf, render_template
+        assert render_template("{author}/{title}", hb).parts[0] == "Ella Page", "illustrator kept out of the folder"
+        assert 'opf:role="ill">Ivo Sketch<' in _opf(hb) and 'opf:role="aut">Ivo Sketch' not in _opf(hb)
         r = c.post("/api/jobs", json={"ref": "hardcover:104", "media": "ebook"})
         r.raise_for_status()
         hj = r.json()

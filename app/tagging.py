@@ -53,7 +53,8 @@ def existing_title(path: Path) -> str | None:
 
 def _fields(book: dict) -> dict:
     series = (book.get("series") or [None])[0] or {}
-    authors = ", ".join(a["name"] for a in book.get("authors") or [])
+    from .providers.base import credited_authors
+    authors = ", ".join(credited_authors(book))
     narrators = ", ".join(book.get("narrators") or [])
     return {
         "album": book.get("title") or "",
