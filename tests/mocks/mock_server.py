@@ -366,7 +366,8 @@ def _hc_contrib(name, role=None):
     return {"contribution": role, "author": {"name": name}}
 
 
-def _hc_book(bid, title, authors, narrators, asin, secs, series=None, desc=None, genres=None, isbn=None, audio=True):
+def _hc_book(bid, title, authors, narrators, asin, secs, series=None, desc=None, genres=None, isbn=None, audio=True,
+             illustrators=()):
     edition = {"id": bid * 10, "asin": asin, "isbn_13": isbn, "audio_seconds": secs, "release_date": "2020-03-01",
                "reading_format_id": 2, "image": {"url": f"{BASE}/cover/hc{bid}.jpg"}, "publisher": {"name": "HC Press"},
                "language": {"language": "English"},
@@ -375,7 +376,7 @@ def _hc_book(bid, title, authors, narrators, asin, secs, series=None, desc=None,
             "release_year": 2020, "slug": title.lower().replace(" ", "-"),
             "cached_tags": {"Genre": [{"tag": g} for g in (genres or [])]},
             "image": {"url": f"{BASE}/cover/hc{bid}.jpg"},
-            "contributions": [_hc_contrib(a) for a in authors],
+            "contributions": [_hc_contrib(a) for a in authors] + [_hc_contrib(i, "Illustrator") for i in illustrators],
             "book_series": [{"position": series[1], "series": {"name": series[0]}}] if series else [],
             "default_audio_edition": edition if audio else None}
 
@@ -387,7 +388,8 @@ HC_BOOKS = {
                   desc="<p>Description from Hardcover.</p>", genres=["Mystery"]),
     103: _hc_book(103, "Indie Tale", ["Ivy Indie"], ["Nell Narr"], None, 60, genres=["Literary"]),
     104: _hc_book(104, "Paper Lantern", ["Ella Page"], [], None, None, series=("Lantern Tales", 1.0),
-                  desc="<p>The printed story of a paper lantern.</p>", genres=["Fantasy"], audio=False),
+                  desc="<p>The printed story of a paper lantern.</p>", genres=["Fantasy"], audio=False,
+                  illustrators=["Ivo Sketch"]),
 }
 
 

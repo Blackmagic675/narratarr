@@ -21,6 +21,7 @@ from xml.sax.saxutils import escape
 import httpx
 
 from .matching import AUDIO_EXTS, EBOOK_EXTS, natural_key
+from .providers.base import OPF_ROLES, credited_authors
 from .tagging import audio_length, tag_book
 
 log = logging.getLogger(__name__)
@@ -46,7 +47,7 @@ def render_template(template: str, book: dict) -> Path:
     seq = series.get("sequence") or ""
     title = book.get("title") or "Unknown Title"
     tokens = {
-        "author": ", ".join(a["name"] for a in (book.get("authors") or [])[:2]) or "Unknown Author",
+        "author": ", ".join(credited_authors(book)[:2]) or "Unknown Author",
         "title": title,
         "series": series.get("name") or "",
         "seq": seq,
@@ -96,8 +97,13 @@ def _opf(book: dict) -> str:
            '<package xmlns="http://www.idpf.org/2007/opf" version="2.0" unique-identifier="asin">\n',
            '  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:opf="http://www.idpf.org/2007/opf">\n']
     out.append(el("dc:title", book.get("title")))
+    credited = credited_authors(book)
+    for name in credited:
+        out.append(el("dc:creator", name, ' opf:role="aut"'))
     for a in book.get("authors") or []:
-        out.append(el("dc:creator", a["name"], ' opf:role="aut"'))
+        if a.get("name") and a["name"] not in credited:
+            code = OPF_ROLES.get((a.get("role") or "").split()[0] if a.get("role") else "", "ctb")
+            out.append(el("dc:contributor", a["name"], f' opf:role="{code}"'))
     for n in book.get("narrators") or []:
         out.append(el("dc:creator", n, ' opf:role="nrt"'))
     out.append(el("dc:publisher", book.get("publisher")))
@@ -129,7 +135,7 @@ def _abs_metadata(book: dict, chapters_embedded: bool) -> dict:
         "chapters": [],
         "title": book.get("title"),
         "subtitle": book.get("subtitle"),
-        "authors": [a["name"] for a in book.get("authors") or []],
+        "authors": credited_authors(book),
         "narrators": book.get("narrators") or [],
         "series": series,
         "genres": book.get("genres") or [],

@@ -32,6 +32,7 @@ from pathlib import Path, PurePosixPath
 import httpx
 
 from ..matching import EBOOK_EXTS, last_name, norm, short_title
+from ..providers.base import credited_authors
 
 log = logging.getLogger(__name__)
 
@@ -146,7 +147,7 @@ def _abs_fields(meta: dict) -> dict:
 def _narratarr_fields(book: dict) -> dict:
     return {
         "title": book.get("title"), "subtitle": book.get("subtitle"),
-        "authors": [a["name"] for a in book.get("authors") or []],
+        "authors": credited_authors(book),
         "narrators": list(book.get("narrators") or []),
         "series": [{"name": s["name"], "sequence": s.get("sequence") or None} for s in book.get("series") or []],
         "genres": list(book.get("genres") or []),

@@ -80,6 +80,22 @@ def split_role(name: str | None) -> tuple[str, str | None]:
     return n, None
 
 
+# OPF MARC relator codes for contributors who aren't the author.
+OPF_ROLES = {"illustrator": "ill", "cover artist": "cov", "editor": "edt", "translator": "trl", "foreword": "aui",
+             "introduction": "aui", "afterword": "aft", "contributor": "ctb"}
+
+
+def credited_authors(book: dict) -> list[str]:
+    """The people a book is 'by': contributors with no role. Illustrators, translators, foreword writers
+    and the like are left out. A book credited only to editors (an anthology) is 'by' its editors."""
+    authors = [a for a in book.get("authors") or [] if a.get("name")]
+    plain = [a["name"] for a in authors if not a.get("role") or a["role"] == "author"]
+    if plain:
+        return plain
+    editors = [a["name"] for a in authors if (a.get("role") or "").startswith("editor")]
+    return editors or [a["name"] for a in authors[:1]]
+
+
 def clean_contributors(book: dict) -> dict:
     """Normalise author/narrator names in a stored book (also fixes jobs saved before role parsing)."""
     authors = []
