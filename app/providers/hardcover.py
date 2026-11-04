@@ -64,8 +64,9 @@ def _seq(position) -> str | None:
     return str(int(f)) if f.is_integer() else str(f)
 
 
-def normalise(b: dict) -> dict:
-    ed = b.get("default_audio_edition") or {}
+def normalise(b: dict, media: str = "audiobook") -> dict:
+    """media="ebook" ignores the audio edition: the book's own cover, no ASIN/narrators/runtime."""
+    ed = {} if media == "ebook" else (b.get("default_audio_edition") or {})
     book = empty_book()
     authors = []
     for c in b.get("contributions") or []:
@@ -109,8 +110,10 @@ def normalise(b: dict) -> dict:
         "genres": _genres(b.get("cached_tags")),
         "cover_url": (ed.get("image") or {}).get("url") or (b.get("image") or {}).get("url"),
         "isbn": ed.get("isbn_13"),
-        "has_audio": bool(ed),
+        "has_audio": bool(b.get("default_audio_edition")),
     })
+    if media == "ebook":
+        book["cover_url"] = (b.get("image") or {}).get("url")
     return book
 
 
@@ -138,13 +141,13 @@ class HardcoverProvider:
             raise HardcoverError("; ".join(e.get("message", "error") for e in data["errors"])[:300])
         return data.get("data") or {}
 
-    async def _books(self, ids: list[int]) -> list[dict]:
+    async def _books(self, ids: list[int], media: str = "audiobook") -> list[dict]:
         if not ids:
             return []
         q = f"query Books($ids: [Int!]) {{ books(where: {{id: {{_in: $ids}}}}) {{ {_BOOK_FIELDS} }} }}"
         rows = (await self._gql(q, {"ids": ids})).get("books") or []
         by_id = {b["id"]: b for b in rows}
-        return [normalise(by_id[i]) for i in ids if i in by_id]
+        return [normalise(by_id[i], media) for i in ids if i in by_id]
 
     async def search(self, query: str, limit: int = 25, media: str = "audiobook") -> list[dict]:
         query = query.strip()
@@ -155,14 +158,14 @@ class HardcoverProvider:
              "{ ids } }")
         data = (await self._gql(q, {"q": query, "n": min(max(limit, 1), 25)})).get("search") or {}
         ids = [int(i) for i in (data.get("ids") or []) if str(i).isdigit()]
-        books = await self._books(ids)
+        books = await self._books(ids, media)
         return books if media == "ebook" else [b for b in books if b["has_audio"]]
 
-    async def get(self, identifier: str, region: str | None = None) -> dict | None:
+    async def get(self, identifier: str, region: str | None = None, media: str = "audiobook") -> dict | None:
         ident = str(identifier).strip()
         if ident.lower().startswith("hardcover:"):
             num = ident.split(":", 1)[1]
-            books = await self._books([int(num)]) if num.isdigit() else []
+            books = await self._books([int(num)], media) if num.isdigit() else []
             return books[0] if books else None
         q = (f"query ByAsin($asin: String!) {{ editions(where: {{asin: {{_eq: $asin}}, reading_format_id: {{_eq: 2}}}}, "
              f"limit: 1) {{ {_EDITION_FIELDS} book {{ {_BOOK_FIELDS} }} }} }}")
@@ -172,4 +175,4 @@ class HardcoverProvider:
         ed = {k: v for k, v in rows[0].items() if k != "book"}
         b = dict(rows[0].get("book") or {})
         b["default_audio_edition"] = ed          # use the edition that matched this ASIN
-        return normalise(b)
+        return normalise(b, media)

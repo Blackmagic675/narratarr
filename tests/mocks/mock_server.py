@@ -101,6 +101,8 @@ CATALOG = {
         {**product("B0GAP00001", "Gap Book", ["Gwen Gap"], [], 1), "publisher_summary": None, "series": []},
         product("B0CHAP0001", "Chapter Book", ["Cora Chapter"], ["Pat Reader"], 1),
         product("B0VAN00001", "Vanish Book", ["Val Vanish"], ["Vic Reader"], 1),
+        product("B0EBOOKFC1", "Paper Lantern (Full-Cast Edition)", ["Ella Page"], ["A Cast"], 1,
+                [("Lantern Tales (Full-Cast Editions)", "1")]),
         product("B0EBOOK001", "Paper Lantern", ["Ella Page"], ["Ned Voice"], 1, [("Lantern Tales", "1")]),
         product("B0EBOOK002", "Paper Lantern", ["Ella Page"], ["Other Narrator"], 1, [("Lantern Tales", "1")]),
         product("B0EDIT0001", "Essays On Rivers", ["Lena Krause - editor", "Omar Field - foreword"],
@@ -364,7 +366,7 @@ def _hc_contrib(name, role=None):
     return {"contribution": role, "author": {"name": name}}
 
 
-def _hc_book(bid, title, authors, narrators, asin, secs, series=None, desc=None, genres=None, isbn=None):
+def _hc_book(bid, title, authors, narrators, asin, secs, series=None, desc=None, genres=None, isbn=None, audio=True):
     edition = {"id": bid * 10, "asin": asin, "isbn_13": isbn, "audio_seconds": secs, "release_date": "2020-03-01",
                "reading_format_id": 2, "image": {"url": f"{BASE}/cover/hc{bid}.jpg"}, "publisher": {"name": "HC Press"},
                "language": {"language": "English"},
@@ -375,7 +377,7 @@ def _hc_book(bid, title, authors, narrators, asin, secs, series=None, desc=None,
             "image": {"url": f"{BASE}/cover/hc{bid}.jpg"},
             "contributions": [_hc_contrib(a) for a in authors],
             "book_series": [{"position": series[1], "series": {"name": series[0]}}] if series else [],
-            "default_audio_edition": edition}
+            "default_audio_edition": edition if audio else None}
 
 
 HC_BOOKS = {
@@ -384,6 +386,8 @@ HC_BOOKS = {
     102: _hc_book(102, "Gap Book", ["Gwen Gap"], ["Hal Cover"], "B0GAP00001", 60, series=("Gap Saga", 2.0),
                   desc="<p>Description from Hardcover.</p>", genres=["Mystery"]),
     103: _hc_book(103, "Indie Tale", ["Ivy Indie"], ["Nell Narr"], None, 60, genres=["Literary"]),
+    104: _hc_book(104, "Paper Lantern", ["Ella Page"], [], None, None, series=("Lantern Tales", 1.0),
+                  desc="<p>The printed story of a paper lantern.</p>", genres=["Fantasy"], audio=False),
 }
 
 
@@ -403,7 +407,7 @@ def hardcover(request: Request, body: dict = Body(...)):
         rows = []
         for b in HC_BOOKS.values():
             ed = b["default_audio_edition"]
-            if ed["asin"] and ed["asin"] == v.get("asin"):
+            if ed and ed["asin"] and ed["asin"] == v.get("asin"):
                 rows.append({**ed, "book": b})
         return {"data": {"editions": rows}}
     return {"errors": [{"message": "unsupported query in mock"}]}
